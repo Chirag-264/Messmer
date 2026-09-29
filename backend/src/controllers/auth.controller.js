@@ -3,11 +3,18 @@ import prisma from "../lib/prisma.js";
 import jwt from "jsonwebtoken";
 
 export const register = async (req, res) => {
-    const { name, email, password } = req.body;
+    const name = req.body.name?.trim();
+    const email = req.body.email?.trim().toLowerCase();
+    const password = req.body.password;
 
     if (!name || !email || !password) {
         return res.status(400).json({
             message: "Name, email and password are required"
+        });
+    }
+    if (password.length < 8) {
+        return res.status(400).json({
+            message: "Password must be at least 8 characters"
         });
     }
 
@@ -46,7 +53,8 @@ export const register = async (req, res) => {
 };
 
 export const login = async (req, res) => {
-    const { email, password } = req.body;
+    const email = req.body.email?.trim().toLowerCase();
+    const password = req.body.password;
 
     if (!email || !password) {
         return res.status(400).json({
