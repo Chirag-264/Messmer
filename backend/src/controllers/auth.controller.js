@@ -33,6 +33,12 @@ export const register = async (req, res) => {
     } catch (error) {
         console.error(error);
 
+        if (error.code === "P2002") {
+            return res.status(409).json({
+                message: "Email is already registered"
+            });
+        }
+
         return res.status(500).json({
             message: "Something went wrong"
         });
