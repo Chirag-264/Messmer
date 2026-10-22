@@ -1,5 +1,5 @@
-import path from "path";
 import fs from "fs";
+import path from "path";
 import prisma from "../lib/prisma.js";
 import { detectFileType } from "../middleware/upload.middleware.js";
 
@@ -30,7 +30,6 @@ export const verifyWorkspaceAccess = async (req, res, next) => {
             });
         }
 
-        // Attach workspace to request for downstream handlers if needed
         req.workspace = workspace;
         next();
     } catch (error) {
@@ -42,68 +41,224 @@ export const verifyWorkspaceAccess = async (req, res, next) => {
 };
 
 /**
- * Handle document upload for a workspace.
+ * Upload a document to a specific workspace.
  * POST /api/workspaces/:workspaceId/documents
  */
 export const uploadDocument = async (req, res) => {
-    // 1. Ensure a file was provided in the multipart request
-    if (!req.file) {
-        return res.status(400).json({
-            message: "No file uploaded. Please provide a file under the 'file' field."
-        });
-    }
-
-    const tempFilePath = req.file.path;
+    const { workspaceId } = req.params;
 
     try {
-        // 2. Validate real file type via magic bytes
-        const verifiedMimeType = await detectFileType(tempFilePath);
+        // If verifyWorkspaceAccess was not used upstream, verify here
+        const workspace = req.workspace || await prisma.workspace.findFirst({
+            where: {
+                id: workspaceId,
+                ownerId: req.user.userId
+            }
+        });
 
-        if (!verifiedMimeType) {
-            // Delete corrupt or spoofed file immediately from disk
-            await fs.promises.unlink(tempFilePath).catch(() => {});
-            return res.status(400).json({
-                message: "Invalid or unsupported file content. Allowed types: PDF, JPEG, PNG, WEBP, MP3, WAV"
+        if (!workspace) {
+            if (req.file) {
+                await fs.promises.unlink(req.file.path).catch(() => {});
+            }
+            return res.status(404).json({
+                message: "Workspace not found"
             });
         }
 
-        // 3. Store relative path (e.g. 'uploads/uuid.ext') for portability and safety
-        const relativeStoredPath = path
-            .relative(process.cwd(), tempFilePath)
-            .replace(/\\/g, "/");
+        if (!req.file) {
+            return res.status(400).json({
+                message: "No file uploaded. Please provide a file with field name 'file'"
+            });
+        }
 
-        // 4. Save metadata in PostgreSQL using Prisma
+        // Detect verified MIME type if available, otherwise use client-provided mimetype
+        const verifiedMime = await detectFileType(req.file.path);
+        const finalMimeType = verifiedMime || req.file.mimetype;
+
         const document = await prisma.document.create({
             data: {
-                workspaceId: req.params.workspaceId,
+                workspaceId,
                 originalName: req.file.originalname,
-                storedPath: relativeStoredPath,
-                mimeType: verifiedMimeType,
+                storedPath: req.file.path,
+                mimeType: finalMimeType,
                 fileSize: req.file.size
             }
         });
 
-        // 5. Return safe metadata (never expose absolute server filesystem paths)
         return res.status(201).json({
             message: "Document uploaded successfully",
-            document: {
-                id: document.id,
-                workspaceId: document.workspaceId,
-                originalName: document.originalName,
-                mimeType: document.mimeType,
-                fileSize: document.fileSize,
-                createdAt: document.createdAt,
-                updatedAt: document.updatedAt
-            }
+            document
         });
     } catch (error) {
-        console.error("Error saving document:", error);
-
-        // 6. Rollback / Cleanup: delete the file from disk if the database insert failed
-        await fs.promises.unlink(tempFilePath).catch(() => {});
-
+        console.error("Error uploading document:", error);
+        if (req.file) {
+            await fs.promises.unlink(req.file.path).catch(() => {});
+        }
         return res.status(500).json({
             message: "Failed to upload document"
+        });
+    }
+};
+
+/**
+ * List all documents within a workspace.
+ * GET /api/workspaces/:workspaceId/documents
+ */
+export const getWorkspaceDocuments = async (req, res) => {
+    const { workspaceId } = req.params;
+
+    try {
+        const workspace = await prisma.workspace.findFirst({
+            where: {
+                id: workspaceId,
+                ownerId: req.user.userId
+            }
+        });
+
+        if (!workspace) {
+            return res.status(404).json({
+                message: "Workspace not found"
+            });
+        }
+
+        const documents = await prisma.document.findMany({
+            where: { workspaceId },
+            orderBy: { createdAt: "desc" }
+        });
+
+        return res.status(200).json({
+            documents
+        });
+    } catch (error) {
+        console.error("Error fetching workspace documents:", error);
+        return res.status(500).json({
+            message: "Failed to fetch documents"
+        });
+    }
+};
+
+/**
+ * Get metadata for a single document.
+ * GET /api/documents/:id
+ */
+export const getDocumentById = async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const document = await prisma.document.findUnique({
+            where: { id },
+            include: {
+                workspace: {
+                    select: {
+                        id: true,
+                        name: true,
+                        ownerId: true
+                    }
+                }
+            }
+        });
+
+        if (!document || document.workspace.ownerId !== req.user.userId) {
+            return res.status(404).json({
+                message: "Document not found"
+            });
+        }
+
+        return res.status(200).json({
+            document
+        });
+    } catch (error) {
+        console.error("Error fetching document:", error);
+        return res.status(500).json({
+            message: "Failed to fetch document"
+        });
+    }
+};
+
+/**
+ * Download a document file.
+ * GET /api/documents/:id/download
+ */
+export const downloadDocument = async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const document = await prisma.document.findUnique({
+            where: { id },
+            include: {
+                workspace: {
+                    select: {
+                        ownerId: true
+                    }
+                }
+            }
+        });
+
+        if (!document || document.workspace.ownerId !== req.user.userId) {
+            return res.status(404).json({
+                message: "Document not found"
+            });
+        }
+
+        if (!fs.existsSync(document.storedPath)) {
+            return res.status(404).json({
+                message: "Physical file not found on disk"
+            });
+        }
+
+        return res.download(document.storedPath, document.originalName);
+    } catch (error) {
+        console.error("Error downloading document:", error);
+        return res.status(500).json({
+            message: "Failed to download document"
+        });
+    }
+};
+
+/**
+ * Delete a document from both the database and local disk.
+ * DELETE /api/documents/:id
+ */
+export const deleteDocument = async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const document = await prisma.document.findUnique({
+            where: { id },
+            include: {
+                workspace: {
+                    select: {
+                        ownerId: true
+                    }
+                }
+            }
+        });
+
+        if (!document || document.workspace.ownerId !== req.user.userId) {
+            return res.status(404).json({
+                message: "Document not found"
+            });
+        }
+
+        // Delete database record first
+        await prisma.document.delete({
+            where: { id }
+        });
+
+        // Delete physical file from disk if it exists
+        if (fs.existsSync(document.storedPath)) {
+            await fs.promises.unlink(document.storedPath).catch((err) => {
+                console.error("Failed to delete physical file:", err);
+            });
+        }
+
+        return res.status(200).json({
+            message: "Document deleted successfully"
+        });
+    } catch (error) {
+        console.error("Error deleting document:", error);
+        return res.status(500).json({
+            message: "Failed to delete document"
         });
     }
 };

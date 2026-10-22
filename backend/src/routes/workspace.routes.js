@@ -7,10 +7,11 @@ import {
 } from "../controllers/workspace.controller.js";
 import {
     verifyWorkspaceAccess,
-    uploadDocument
+    uploadDocument,
+    getWorkspaceDocuments
 } from "../controllers/document.controller.js";
-import { handleSingleUpload } from "../middleware/upload.middleware.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
+import { handleUploadSingle } from "../middleware/upload.middleware.js";
 
 const router = express.Router();
 
@@ -22,12 +23,13 @@ router.get("/", getWorkspaces);
 router.get("/:id", getWorkspaceById);
 router.delete("/:id", deleteWorkspace);
 
-// Document upload route for a specific workspace
+// Workspace Document routes
 router.post(
     "/:workspaceId/documents",
     verifyWorkspaceAccess,
-    handleSingleUpload("file"),
+    handleUploadSingle("file"),
     uploadDocument
 );
+router.get("/:workspaceId/documents", getWorkspaceDocuments);
 
 export default router;
